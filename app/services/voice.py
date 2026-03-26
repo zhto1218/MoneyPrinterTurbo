@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import json
 import os
 import re
 from datetime import datetime
 from typing import Union
+from uuid import uuid4
 from xml.sax.saxutils import unescape
 
 import edge_tts
@@ -15,6 +18,36 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 from app.config import config
 from app.utils import utils
+
+
+VOLCENGINE_TTS_URL = "https://openspeech.bytedance.com/api/v1/tts"
+
+
+def get_volcengine_voices() -> list[str]:
+    """
+    获取火山引擎常用音色列表
+
+    Returns:
+        声音列表，格式为 ["volcengine:VC_BV700_streaming:灿灿-Female", ...]
+    """
+    voices_with_gender = [
+        ("VC_BV700_streaming", "灿灿", "Female"),
+        ("VC_BV001_streaming", "通用女声", "Female"),
+        ("VC_BV056_streaming", "阳光男声", "Male"),
+        ("VC_BV050_streaming", "动漫小新", "Male"),
+        ("VC_BV051_streaming", "奶气萌娃", "Male"),
+        ("VC_BV405_streaming", "甜美小源", "Female"),
+        ("VC_BV408_streaming", "译制片男声", "Male"),
+        ("VC_BV005_streaming", "活泼女声", "Female"),
+        ("VC_BV006_streaming", "磁性男声", "Male"),
+        ("VC_BV011_streaming", "新闻女声", "Female"),
+        ("VC_BV034_streaming", "知性姐姐-双语", "Female"),
+    ]
+
+    return [
+        f"volcengine:{voice_type}:{display_name}-{gender}"
+        for voice_type, display_name, gender in voices_with_gender
+    ]
 
 
 def get_siliconflow_voices() -> list[str]:
@@ -1116,6 +1149,26 @@ def is_gemini_voice(voice_name: str):
     return voice_name.startswith("gemini:")
 
 
+def is_volcengine_voice(voice_name: str):
+    """检查是否是火山引擎的声音"""
+    return voice_name.startswith("volcengine:")
+
+
+def parse_volcengine_voice_type(voice_name: str) -> str:
+    """
+    从 voice_name 中提取火山引擎的 voice_type
+
+    支持:
+    - volcengine:VC_BV700_streaming
+    - volcengine:VC_BV700_streaming:灿灿-Female
+    """
+    voice_name = parse_voice_name(voice_name)
+    parts = voice_name.split(":")
+    if len(parts) >= 2 and parts[0] == "volcengine":
+        return parts[1].strip()
+    return ""
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -1154,6 +1207,14 @@ def tts(
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
             return None
+    elif is_volcengine_voice(voice_name):
+        voice_type = parse_volcengine_voice_type(voice_name)
+        if voice_type:
+            return volcengine_tts(
+                text, voice_type, voice_rate, voice_file, voice_volume
+            )
+        logger.error(f"Invalid volcengine voice name format: {voice_name}")
+        return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 
@@ -1557,6 +1618,228 @@ def gemini_tts(
     except Exception as e:
         logger.error(f"Gemini TTS failed, error: {str(e)}")
         return None
+
+
+def _split_text_by_utf8_length(text: str, max_bytes: int = 1024) -> list[str]:
+    """
+    将文本按 UTF-8 字节长度切分，优先按标点分句。
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    sentences = []
+    current_sentence = ""
+    for char in text:
+        current_sentence += char
+        if char in "。！？!?；;，,\n":
+            if current_sentence.strip():
+                sentences.append(current_sentence.strip())
+            current_sentence = ""
+
+    if current_sentence.strip():
+        sentences.append(current_sentence.strip())
+
+    if not sentences:
+        sentences = [text]
+
+    chunks = []
+    current = ""
+
+    def _append_with_limit(content: str):
+        current_chunk = ""
+        for char in content:
+            if len((current_chunk + char).encode("utf-8")) > max_bytes:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = char
+            else:
+                current_chunk += char
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        candidate = f"{current}{sentence}"
+        if current and len(candidate.encode("utf-8")) > max_bytes:
+            chunks.append(current)
+            current = sentence
+        elif len(sentence.encode("utf-8")) > max_bytes:
+            if current:
+                chunks.append(current)
+                current = ""
+            _append_with_limit(sentence)
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _create_sub_maker_from_volcengine_response(
+    frontend_payload,
+    fallback_text: str,
+    chunk_offset_100ns: int,
+    chunk_duration_100ns: int,
+) -> SubMaker:
+    sub_maker = SubMaker()
+
+    if frontend_payload:
+        try:
+            frontend_data = (
+                json.loads(frontend_payload)
+                if isinstance(frontend_payload, str)
+                else frontend_payload
+            )
+            for word in frontend_data.get("words", []):
+                token = word.get("word", "")
+                if not token:
+                    continue
+                start_time = int(float(word.get("start_time", 0)) * 10000000)
+                end_time = int(float(word.get("end_time", 0)) * 10000000)
+                sub_maker.subs.append(token)
+                sub_maker.offset.append(
+                    (
+                        chunk_offset_100ns + start_time,
+                        chunk_offset_100ns + end_time,
+                    )
+                )
+        except Exception as err:
+            logger.warning(f"failed to parse volcengine timestamps: {err}")
+
+    if not sub_maker.subs:
+        sub_maker.create_sub(
+            (chunk_offset_100ns, chunk_offset_100ns + chunk_duration_100ns),
+            fallback_text,
+        )
+
+    return sub_maker
+
+
+def volcengine_tts(
+    text: str,
+    voice_type: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """
+    使用火山引擎在线语音合成 API 生成语音。
+    """
+    text = text.strip()
+    app_id = config.volcengine.get("app_id", "")
+    access_token = config.volcengine.get("access_token", "")
+    cluster = config.volcengine.get("cluster", "volcano_tts")
+
+    if not app_id or not access_token:
+        logger.error("Volcengine app_id or access_token is not set")
+        return None
+
+    text_chunks = _split_text_by_utf8_length(text)
+    if not text_chunks:
+        logger.error("Volcengine text is empty after preprocessing")
+        return None
+
+    merged_sub_maker = SubMaker()
+    combined_audio = bytearray()
+    total_offset_100ns = 0
+
+    speed_ratio = max(0.2, min(3.0, voice_rate))
+    volume_ratio = max(0.1, min(3.0, voice_volume))
+
+    for chunk_index, chunk_text in enumerate(text_chunks):
+        payload = {
+            "app": {
+                "appid": app_id,
+                "token": access_token,
+                "cluster": cluster,
+            },
+            "user": {
+                "uid": str(uuid4()),
+            },
+            "audio": {
+                "voice_type": voice_type,
+                "encoding": "mp3",
+                "rate": 24000,
+                "speed_ratio": speed_ratio,
+                "volume_ratio": volume_ratio,
+                "pitch_ratio": 1.0,
+            },
+            "request": {
+                "reqid": str(uuid4()),
+                "text": chunk_text,
+                "text_type": "plain",
+                "operation": "query",
+                "with_timestamp": "1",
+                "pure_english_opt": "1",
+                "extra_param": json.dumps(
+                    {"disable_emoji_filter": True},
+                    ensure_ascii=False,
+                ),
+            },
+        }
+
+        for attempt in range(3):
+            try:
+                logger.info(
+                    f"start volcengine tts, voice_type: {voice_type}, chunk: {chunk_index + 1}/{len(text_chunks)}, try: {attempt + 1}"
+                )
+                response = requests.post(
+                    VOLCENGINE_TTS_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60,
+                )
+                response.raise_for_status()
+
+                result = response.json()
+                if result.get("code") != 3000:
+                    logger.error(
+                        f"volcengine tts failed with code {result.get('code')}: {result.get('message')}"
+                    )
+                    continue
+
+                audio_base64 = result.get("data", "")
+                if not audio_base64:
+                    logger.error("volcengine tts returned empty audio data")
+                    continue
+
+                audio_bytes = base64.b64decode(audio_base64)
+                combined_audio.extend(audio_bytes)
+
+                addition = result.get("addition", {}) or {}
+                chunk_duration_ms = float(addition.get("duration", 0) or 0)
+                chunk_duration_100ns = int(chunk_duration_ms * 10000)
+
+                chunk_sub_maker = _create_sub_maker_from_volcengine_response(
+                    addition.get("frontend"),
+                    chunk_text,
+                    total_offset_100ns,
+                    chunk_duration_100ns,
+                )
+                if chunk_duration_100ns <= 0 and chunk_sub_maker.offset:
+                    chunk_duration_100ns = (
+                        chunk_sub_maker.offset[-1][1] - total_offset_100ns
+                    )
+                merged_sub_maker.subs.extend(chunk_sub_maker.subs)
+                merged_sub_maker.offset.extend(chunk_sub_maker.offset)
+                total_offset_100ns += chunk_duration_100ns
+                break
+            except Exception as err:
+                logger.error(f"volcengine tts failed: {err}")
+        else:
+            return None
+
+    with open(voice_file, "wb") as audio_fp:
+        audio_fp.write(combined_audio)
+
+    logger.success(f"volcengine tts succeeded: {voice_file}")
+    return merged_sub_maker
 
 
 def _format_text(text: str) -> str:
