@@ -3,6 +3,7 @@ import unittest
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 # add project root to python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -100,6 +101,41 @@ class TestVoiceService(unittest.TestCase):
             print(f"voice: {voice_name}, audio duration: {audio_duration}s")
 
         self.loop.run_until_complete(_do())
+
+    def test_is_volcengine_voice(self):
+        self.assertTrue(vs.is_volcengine_voice("volcengine:VC_BV700_streaming"))
+        self.assertFalse(vs.is_volcengine_voice("gemini:Zephyr-Female"))
+
+    def test_parse_volcengine_voice_type(self):
+        self.assertEqual(
+            vs.parse_volcengine_voice_type("volcengine:VC_BV700_streaming:灿灿-Female"),
+            "VC_BV700_streaming",
+        )
+        self.assertEqual(
+            vs.parse_volcengine_voice_type("volcengine:VC_BV700_streaming"),
+            "VC_BV700_streaming",
+        )
+
+    @patch("app.services.voice.volcengine_tts")
+    def test_tts_dispatches_to_volcengine(self, volcengine_tts_mock):
+        volcengine_tts_mock.return_value = "volcengine-sub-maker"
+
+        result = vs.tts(
+            text="测试火山引擎语音",
+            voice_name="volcengine:VC_BV700_streaming:灿灿-Female",
+            voice_rate=1.0,
+            voice_file=f"{temp_dir}/volcengine-test.mp3",
+            voice_volume=1.2,
+        )
+
+        self.assertEqual(result, "volcengine-sub-maker")
+        volcengine_tts_mock.assert_called_once_with(
+            "测试火山引擎语音",
+            "VC_BV700_streaming",
+            1.0,
+            f"{temp_dir}/volcengine-test.mp3",
+            1.2,
+        )
 
 if __name__ == "__main__":
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v1

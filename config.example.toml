@@ -216,6 +216,16 @@ speech_region = ""
 # Get your API key at https://siliconflow.cn
 api_key = ""
 
+[volcengine]
+# Volcengine TTS App ID
+app_id = ""
+# Volcengine TTS Access Token
+access_token = ""
+# Volcengine TTS cluster, usually "volcano_tts"
+cluster = "volcano_tts"
+# Optional custom voice_type, for example "VC_BV700_streaming"
+voice_type = ""
+
 [ui]
 # UI related settings
 # 是否隐藏日志信息

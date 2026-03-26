@@ -650,6 +650,7 @@ with middle_panel:
             ("azure-tts-v2", "Azure TTS V2"),
             ("siliconflow", "SiliconFlow TTS"),
             ("gemini-tts", "Google Gemini TTS"),
+            ("volcengine-tts", "Volcengine TTS"),
         ]
 
         # 获取保存的TTS服务器，默认为v1
@@ -679,6 +680,14 @@ with middle_panel:
         elif selected_tts_server == "gemini-tts":
             # 获取Gemini TTS的声音列表
             filtered_voices = voice.get_gemini_voices()
+        elif selected_tts_server == "volcengine-tts":
+            # 获取火山引擎的声音列表
+            filtered_voices = voice.get_volcengine_voices()
+            saved_volcengine_voice_type = config.volcengine.get("voice_type", "").strip()
+            if saved_volcengine_voice_type:
+                custom_voice_name = f"volcengine:{saved_volcengine_voice_type}"
+                if custom_voice_name not in filtered_voices:
+                    filtered_voices.append(custom_voice_name)
         else:
             # 获取Azure的声音列表
             all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -694,15 +703,34 @@ with middle_panel:
                     if "V2" not in v:
                         filtered_voices.append(v)
 
-        friendly_names = {
-            v: v.replace("Female", tr("Female"))
-            .replace("Male", tr("Male"))
-            .replace("Neural", "")
-            for v in filtered_voices
-        }
+        if selected_tts_server == "volcengine-tts":
+            friendly_names = {}
+            for v in filtered_voices:
+                parts = v.split(":")
+                voice_type = parts[1] if len(parts) >= 2 else v
+                voice_label = parts[2] if len(parts) >= 3 else voice_type
+                gender = ""
+                if voice_label.endswith("-Female"):
+                    voice_label = voice_label[: -len("-Female")]
+                    gender = tr("Female")
+                elif voice_label.endswith("-Male"):
+                    voice_label = voice_label[: -len("-Male")]
+                    gender = tr("Male")
+
+                friendly_names[v] = f"{voice_label} ({voice_type})"
+                if gender:
+                    friendly_names[v] += f" - {gender}"
+        else:
+            friendly_names = {
+                v: v.replace("Female", tr("Female"))
+                .replace("Male", tr("Male"))
+                .replace("Neural", "")
+                for v in filtered_voices
+            }
 
         saved_voice_name = config.ui.get("voice_name", "")
         saved_voice_name_index = 0
+        voice_name = saved_voice_name
 
         # 检查保存的声音是否在当前筛选的声音列表中
         if saved_voice_name in friendly_names:
@@ -740,6 +768,7 @@ with middle_panel:
                     "No voices available for the selected TTS server. Please select another server."
                 )
             )
+            voice_name = ""
             params.voice_name = ""
             config.ui["voice_name"] = ""
 
@@ -821,6 +850,49 @@ with middle_panel:
             )
 
             config.siliconflow["api_key"] = siliconflow_api_key
+
+        if selected_tts_server == "volcengine-tts" or (
+            voice_name and voice.is_volcengine_voice(voice_name)
+        ):
+            saved_volcengine_app_id = config.volcengine.get("app_id", "")
+            saved_volcengine_access_token = config.volcengine.get("access_token", "")
+            saved_volcengine_cluster = config.volcengine.get("cluster", "volcano_tts")
+            saved_volcengine_voice_type = config.volcengine.get("voice_type", "")
+
+            volcengine_app_id = st.text_input(
+                tr("Volcengine App ID"),
+                value=saved_volcengine_app_id,
+                key="volcengine_app_id_input",
+            )
+            volcengine_access_token = st.text_input(
+                tr("Volcengine Access Token"),
+                value=saved_volcengine_access_token,
+                type="password",
+                key="volcengine_access_token_input",
+            )
+            volcengine_cluster = st.text_input(
+                tr("Volcengine Cluster"),
+                value=saved_volcengine_cluster,
+                key="volcengine_cluster_input",
+            )
+            volcengine_voice_type = st.text_input(
+                tr("Volcengine Custom Voice Type"),
+                value=saved_volcengine_voice_type,
+                key="volcengine_voice_type_input",
+                help=tr(
+                    "Optional: override the selected voice with a custom voice_type, for example VC_BV700_streaming"
+                ),
+            )
+
+            config.volcengine["app_id"] = volcengine_app_id
+            config.volcengine["access_token"] = volcengine_access_token
+            config.volcengine["cluster"] = volcengine_cluster.strip() or "volcano_tts"
+            config.volcengine["voice_type"] = volcengine_voice_type.strip()
+
+            if volcengine_voice_type.strip():
+                voice_name = f"volcengine:{volcengine_voice_type.strip()}"
+                params.voice_name = voice_name
+                config.ui["voice_name"] = voice_name
 
         params.voice_volume = st.selectbox(
             tr("Speech Volume"),
